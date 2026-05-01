@@ -1,0 +1,431 @@
+---
+title: emdash-control
+description: A control plane for managing emdash site deployments — site registry, secrets, and deploy history on Cloudflare infrastructure, driven by CLI or web UI.
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+# emdash-control
+
+A lightweight control plane for managing emdash site deployments. Stores site registry, secrets, and deployment history on Cloudflare infrastructure. Accessible via CLI (`emdash control` subcommands) and a future web UI — both talk to the same API, no copy-paste required.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                 emdash-control Worker                │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐ │
+│  │ D1       │  │ KV       │  │ Cloudflare API    │ │
+│  │ registry │  │ sessions │  │ (provision sites) │ │
+│  └──────────┘  └──────────┘  └───────────────────┘ │
+└─────────────────────────────────────────────────────┘
+         ▲                    ▲
+         │ REST API           │ REST API
+    ┌────┴────┐          ┌────┴────┐
+    │   CLI   │          │ Web UI  │
+    │ emdash  │          │(future) │
+    └─────────┘          └─────────┘
+```
+
+**Cloudflare services used:**
+
+| Service | Binding | Purpose |
+|---------|---------|---------|
+| Workers | — | Control plane API host |
+| D1 | `DB` | Site registry, deploy log, encrypted secrets |
+| KV | `SESSIONS` | CLI session tokens |
+| Cloudflare API | via secret | Provision D1/R2/secrets on managed sites |
+
+**Free tier:** The control plane itself fits on the Workers free tier (D1 + KV both have generous free limits). Managed sites require the Workers Paid plan ($5/mo) due to Worker Loaders.
+
+---
+
+## D1 Schema
+
+```sql
+CREATE TABLE sites (
+  id           TEXT PRIMARY KEY,         -- ulid
+  name         TEXT NOT NULL UNIQUE,     -- human name / slug
+  worker_name  TEXT NOT NULL UNIQUE,     -- wrangler worker name
+  account_id   TEXT NOT NULL,            -- CF account this site lives in
+  d1_database_id TEXT,                   -- null until provisioned
+  r2_bucket    TEXT,
+  domain       TEXT,
+  template     TEXT NOT NULL,
+  platform     TEXT NOT NULL DEFAULT 'cloudflare',
+  created_at   TEXT NOT NULL,
+  last_deployed_at TEXT
+);
+
+CREATE TABLE site_secrets (
+  id        TEXT PRIMARY KEY,
+  site_id   TEXT NOT NULL REFERENCES sites(id),
+  key       TEXT NOT NULL,              -- e.g. EMDASH_ENCRYPTION_KEY
+  value_enc TEXT NOT NULL,             -- encrypted with control plane key
+  created_at TEXT NOT NULL,
+  UNIQUE(site_id, key)
+);
+
+CREATE TABLE deploy_log (
+  id          TEXT PRIMARY KEY,
+  site_id     TEXT NOT NULL REFERENCES sites(id),
+  deployed_at TEXT NOT NULL,
+  status      TEXT NOT NULL,           -- success | failed
+  wrangler_version TEXT,
+  notes       TEXT
+);
+
+CREATE TABLE credentials (
+  id          TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  token_hash  TEXT NOT NULL UNIQUE,    -- SHA-256 of the bearer token
+  created_at  TEXT NOT NULL,
+  last_used_at TEXT
+);
+```
+
+---
+
+## Bootstrap: One-time Control Plane Setup
+
+This is the only time you interact with `wrangler` directly. After this, the CLI handles everything.
+
+### Prerequisites
+
+- Node.js v22+
+- Wrangler CLI: `npm install -g wrangler`
+- A Cloudflare account
+
+---
+
+### Step 1 — Authenticate wrangler
+
+```bash
+wrangler login
+```
+
+This opens a browser to authenticate. One-time only.
+
+---
+
+### Step 2 — Clone and configure the control plane
+
+```bash
+git clone https://github.com/emdash-cms/emdash-control.git
+cd emdash-control
+pnpm install
+```
+
+---
+
+### Step 3 — Create the D1 database
+
+```bash
+wrangler d1 create emdash-control
+```
+
+Copy the `database_id` from the output and paste it into `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "emdash-control",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "emdash-control",
+      "database_id": "<paste-id-here>"   // ← only manual step in this file
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "<paste-id-here>"             // ← from step 4
+    }
+  ]
+}
+```
+
+---
+
+### Step 4 — Create the KV namespace
+
+```bash
+wrangler kv namespace create emdash-control-sessions
+```
+
+Paste the `id` into `wrangler.jsonc` as shown above.
+
+---
+
+### Step 5 — Generate and set the control plane encryption key
+
+This key encrypts all site secrets stored in D1. Keep it safe — losing it means losing all stored secrets.
+
+```bash
+npx emdash secrets generate | wrangler secret put CONTROL_ENCRYPTION_KEY
+```
+
+---
+
+### Step 6 — Store your Cloudflare API token
+
+The control plane needs a Cloudflare API token to provision D1 databases, R2 buckets, and worker secrets on your behalf.
+
+Create a token at https://dash.cloudflare.com/profile/api-tokens with these permissions:
+- Account / D1 / Edit
+- Account / R2 / Edit
+- Account / Workers Scripts / Edit
+- Account / Workers KV / Edit
+
+<Aside type="caution" title="Dashboard step — API token creation">
+API token creation requires the Cloudflare dashboard at `dash.cloudflare.com/profile/api-tokens`. No CLI equivalent exists for this step.
+</Aside>
+
+```bash
+wrangler secret put CLOUDFLARE_API_TOKEN
+# paste your token when prompted
+```
+
+Also set your account ID — use `wrangler whoami` to find it without opening the dashboard:
+
+```bash
+wrangler whoami  # prints your account ID
+wrangler secret put CLOUDFLARE_ACCOUNT_ID
+```
+
+---
+
+### Step 7 — Apply migrations
+
+```bash
+wrangler d1 execute emdash-control --file=./migrations/0001_init.sql
+```
+
+---
+
+### Step 8 — Deploy the control plane
+
+```bash
+wrangler deploy
+```
+
+Output: `emdash-control.<your-subdomain>.workers.dev`
+
+---
+
+### Step 9 — Generate a CLI token
+
+```bash
+npx emdash control token create --label "my-machine"
+```
+
+This hits the newly deployed control plane, creates a credential record, and writes the token to `~/.config/emdash/auth.json`. All subsequent `emdash control` and `emdash deploy` commands use this token automatically — no further wrangler interaction needed.
+
+---
+
+### Step 10 — (Optional) Custom domain
+
+```bash
+wrangler custom-domains add control.yourdomain.com
+```
+
+<Aside type="caution" title="Dashboard step — external DNS only">
+If your domain's DNS is **not** on Cloudflare, add a CNAME record via your DNS provider's dashboard:
+
+```
+control.yourdomain.com  CNAME  emdash-control.<your-subdomain>.workers.dev
+```
+
+If your domain **is** on Cloudflare, `wrangler custom-domains add` handles the DNS record automatically — no dashboard needed.
+</Aside>
+
+Update your local config to point at the custom domain:
+
+```bash
+npx emdash control use https://control.yourdomain.com
+```
+
+---
+
+## Day-to-day: Deploying a Site
+
+After bootstrap, this is the full workflow — no wrangler, no dashboard.
+
+### Create a deploy config
+
+```json
+// emdash.deploy.json
+{
+  "name": "my-blog",
+  "template": "blog",
+  "platform": "cloudflare",
+  "domain": "blog.yourdomain.com",
+  "auth": {
+    "providers": ["google"]
+  },
+  "seed": true
+}
+```
+
+### Run the deploy
+
+```bash
+npm create emdash@latest --config emdash.deploy.json
+```
+
+Behind the scenes:
+
+1. Scaffolds the project from the template
+2. Calls control plane: `POST /sites` — registers the site
+3. Control plane calls Cloudflare API: creates D1 database, R2 bucket
+4. Control plane generates and stores `EMDASH_ENCRYPTION_KEY` (encrypted in D1)
+5. Control plane pushes secrets to the new worker via Cloudflare API
+6. CLI writes `wrangler.jsonc` and `astro.config.mjs` with correct IDs/bindings
+7. Runs D1 migrations via Cloudflare API
+8. Runs `wrangler deploy`
+9. Seeds content if `seed: true`
+10. Control plane records successful deploy in `deploy_log`
+
+---
+
+### Custom domain for a site
+
+```bash
+npx emdash control sites domain set my-blog blog.yourdomain.com
+```
+
+<Aside type="caution" title="Dashboard step — external DNS only">
+If your domain's DNS is not on Cloudflare, add a CNAME record via your DNS provider's dashboard:
+
+```
+blog.yourdomain.com  CNAME  my-blog.<your-subdomain>.workers.dev
+```
+
+If your domain is on Cloudflare, the CLI handles this automatically via the API.
+</Aside>
+
+---
+
+## CLI Reference
+
+```
+emdash control init              Bootstrap the control plane (one-time)
+emdash control token create      Generate a new CLI auth token
+emdash control token list        List active tokens
+emdash control token revoke      Revoke a token
+emdash control use <url>         Set the control plane URL
+
+emdash control sites list        List all registered sites
+emdash control sites show <name> Show site details (no secret values)
+emdash control sites delete <name>
+
+emdash control secrets set <site> <KEY> <value>
+emdash control secrets list <site>      List keys (no values shown)
+emdash control secrets rotate <site> <KEY>
+
+emdash control deploy <name>     Re-deploy an existing site
+emdash control log <name>        Show deploy history
+```
+
+---
+
+## Security model
+
+- **Secrets are never shown** — the web UI and `secrets list` show key names only. Values are write-only after storage.
+- **Encryption at rest** — `site_secrets.value_enc` is encrypted with `CONTROL_ENCRYPTION_KEY` before writing to D1.
+- **CLI tokens** — stored as SHA-256 hashes in D1. The raw token is shown once on creation and never again (same model as GitHub PATs).
+- **Cloudflare API token** — stored as a wrangler secret on the control plane worker, never in D1. The control plane is the only thing that ever sees it.
+- **No cross-account access** — the control plane can only provision resources in the account whose `CLOUDFLARE_API_TOKEN` it holds.
+
+---
+
+## Steps requiring the Cloudflare dashboard
+
+These are the only steps that cannot be fully automated via CLI.
+
+| Step | Reason | Workaround |
+|------|--------|------------|
+| Create API token | Token creation UI only exists in dashboard | One-time; token is stored after |
+| External DNS CNAME | Your DNS provider's dashboard | Use Cloudflare DNS to avoid this entirely |
+| Account ID | Also available via `wrangler whoami` | Not actually dashboard-only |
+| D1 read replication | Dashboard toggle (for now) | Optional; only needed for global scale |
+
+In practice: **one dashboard visit** (API token creation) covers the entire lifecycle if you use Cloudflare for DNS.
+
+---
+
+## `emdash.deploy.json` schema
+
+```typescript
+interface DeployConfig {
+  // Required
+  name: string;              // site slug, used as worker name
+  template: "blog" | "starter" | "marketing" | "portfolio";
+  platform: "cloudflare";    // node support TBD
+
+  // Optional
+  domain?: string;           // custom domain to attach
+  packageManager?: "pnpm" | "npm" | "yarn" | "bun";
+  seed?: boolean;            // run seed after deploy (default: true)
+
+  auth?: {
+    providers?: ("google" | "github" | "atproto")[];
+    cloudflareAccess?: {
+      teamDomain: string;
+      audience: string;
+    };
+  };
+
+  // Advanced
+  wrangler?: {
+    compatibilityDate?: string;
+    workerLoaders?: boolean;  // default: true (requires paid plan)
+  };
+
+  // Control plane (defaults to ~/.config/emdash/auth.json)
+  controlPlane?: {
+    url?: string;
+  };
+}
+```
+
+---
+
+## Repository structure (proposed)
+
+```
+emdash-control/
+├── src/
+│   ├── index.ts              Worker entry / router
+│   ├── routes/
+│   │   ├── sites.ts          CRUD for site registry
+│   │   ├── secrets.ts        Secret management
+│   │   ├── deploy.ts         Deploy trigger + log
+│   │   └── credentials.ts    CLI token management
+│   ├── db/
+│   │   ├── schema.ts         Kysely table types
+│   │   └── migrations.ts
+│   ├── provision/
+│   │   └── cloudflare.ts     Cloudflare API client (D1/R2/secrets)
+│   └── crypto.ts             Encrypt/decrypt with CONTROL_ENCRYPTION_KEY
+├── migrations/
+│   └── 0001_init.sql
+├── wrangler.jsonc
+└── package.json
+```
+
+---
+
+## Relationship to emdash core
+
+`emdash-control` is a **separate repository and worker** — it is not part of the emdash monorepo. It depends on no emdash packages. The integration point is the `emdash` CLI in `packages/core`, which gains:
+
+- `emdash control *` subcommands (new)
+- `--config emdash.deploy.json` support in `create-emdash` (PR)
+- Control plane awareness in `emdash deploy` (PR)
+
+The control plane speaks plain JSON over HTTPS. Any future web UI is just another HTTP client.
