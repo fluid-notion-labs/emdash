@@ -1,150 +1,280 @@
 # Reticulation Garden Doctor — Domain & Tooling Plan
 
-> For review by Opus. Context: Lee's one-man Perth reticulation install business.
+> Context: Lee's one-man Perth reticulation install business.
 > Site is being rebuilt on emdash (Astro + Cloudflare Workers + D1).
-> TypeScript throughout. No Rust.
+> TypeScript throughout.
+>
+> This plan has two layers:
+>   - **Phase 1**: a parts catalogue / BOM tool for Lee's site (the immediate need)
+>   - **Phase 0**: a schema-first tooling experiment that the retic site is the first user of (the long-term interest)
+>
+> The retic site is the test bed; the schema language is the experiment.
 
 ---
 
-## What we're building (phase 1)
+## The experiment
 
-A parts catalogue and bill-of-materials tool embedded in the emdash site.
-The goal is: given a job (e.g. "3-zone residential lawn"), produce a parts list
-with quantities and supplier info. Not a full ERP — just what Lee needs on the job.
+> What does a good "single source of truth schema" format look like for the
+> agent-and-human-collaboration era?
+
+A declarative schema that drives:
+
+- TypeScript types
+- Zod validation schemas
+- emdash content type config (so Lee's site uses emdash's admin UI)
+- SQL migrations for D1
+- Markdown documentation
+- *Eventually*: Rust structs for FluidX3D-adjacent work, JSON Schema for API contracts
+
+If after one real use (the retic site) the format earns its keep, it becomes its
+own repo (`fluid-notion-labs/schemata`). If it doesn't, we throw it away and the
+retic site keeps the generated code.
 
 ---
 
-## Domain model (trimmed)
+## Format choice: strict-subset YAML
 
-Defined in `domain.toml`, source of truth for codegen.
+Rather than invent a new format with a custom parser, we use YAML 1.2 core
+schema with a deliberately narrow subset:
 
-### Entities
+**Use:**
+- Block mappings and sequences (indentation hierarchy)
+- Inline flow style for terse single-line leaf field definitions only
+- `|` for multi-line preserved-newline strings (docs, notes)
+- `#` comments
+- Quoted strings everywhere a string is a string
 
-**ProductCategory**
-Hierarchical. e.g. Heads > Rotary, Pipe & Fittings, Valves, Controllers, Wire.
+**Do not use:**
+- Implicit typing (the Norway problem) — quote all string scalars
+- Anchors/aliases (`&` / `*`) — fragile, don't roundtrip well across editors
+- Multi-document files (`---`) — one file = one document
+- Tags (`!!python/object` etc.) — pure data only
+- Flow style for nested structures
 
-**Product**
-A part Lee actually uses. Brand + model specific (e.g. "Hunter PGP-ADJ").
-Fields: name, sku, category, brand, unit (each/m/roll), description,
-head_type?, radius_m?, flow_rate_lpm?, is_active.
+A `domain.schema.json` (JSON Schema) describes what `domain.yaml` may contain.
+Editors give us autocomplete and validation for free via:
 
-**Supplier**
-Where Lee buys from. e.g. Reece, WA Retic Supplies, Nutrien Water, Holman Direct.
-Fields: name, type (wholesaler/retailer), website, notes.
+```jsonc
+// .vscode/settings.json or equivalent
+"yaml.schemas": {
+  "./domain.schema.json": "domain.yaml"
+}
+```
 
-**SupplierProduct**
-A supplier's variant of a product — their SKU, trade price, availability.
-Fields: supplier_id, product_id, supplier_sku, unit_price, trade_price?,
-in_stock, last_checked?.
-Function: `effectivePrice()` → trade_price ?? unit_price.
+This means **zero parser code to maintain** and we get to focus on the
+interesting question: what does the schema vocabulary look like.
 
-**JobTemplate**
-A reusable install pattern. e.g. "Standard lawn zone", "Drip garden zone".
-Fields: name, description, notes.
+---
 
-**JobTemplateLine**
-One line in a template — a product + quantity formula.
-Fields: template_id, product_id, description, quantity_formula (string),
-sort_order.
-The formula is a simple expression evaluated against job inputs:
-e.g. `"ceil(area_m2 / head_coverage_m2)"` or `"pipe_run_m * 1.1"`.
+## What's in the schema
 
-**BillOfMaterials**
-A concrete parts list for a specific job, derived from a template
-plus measured site inputs (area, pipe runs, zone count etc.).
-Fields: name, site_address?, created_at, notes.
+Data shape only. **No function bodies.** Computed behaviour lives in
+hand-written TypeScript and is referenced by name from the schema:
 
-**BOMLine**
-One line of a BOM — resolved product + quantity + supplier selection.
-Fields: bom_id, product_id, description, quantity, supplier_product_id?,
-unit_price_snapshot?, notes.
-Function: `lineTotal()` → quantity * unit_price_snapshot.
+```yaml
+SupplierProduct:
+  fields:
+    unitPrice:   { type: "money" }
+    tradePrice:  { type: "money", optional: true }
+  computed:
+    effectivePrice:
+      type: "money"
+      fn: "supplierProductEffectivePrice"   # name of TS function in src/domain/fns.ts
+```
 
-### Value types
+The codegen emits a typed function signature stub the first time it sees the
+name. Subsequent runs leave the file alone if the function exists. The
+schema *references* behaviour; it doesn't *define* it.
 
-**FlowRate** — lpm: f64. Methods: lph().
-**WaterPressure** — kpa: f64. Methods: psi(), isLow(), isHigh().
+---
+
+## Domain model (phase 1 scope)
+
+Just the parts catalogue + BOM slice. Everything else (quoting, procurement,
+logistics) is deferred and noted at the end.
 
 ### Enums
 
-HeadType: Rotary | Fixed | MicroSpray | Drip | Subsurface
-SupplierType: Wholesaler | Retailer | Online | DirectManufacturer
+- `HeadType`: Rotary | Fixed | MicroSpray | Drip | Subsurface
+- `SupplierType`: Wholesaler | Retailer | Online | DirectManufacturer
+
+### Value types
+
+- `FlowRate` — `{ lpm: f64 }`
+- `WaterPressure` — `{ kpa: f64 }`
+
+### Entities
+
+**ProductCategory** — hierarchical (self-ref via `parentId`).
+Fields: name, slug, parentId?.
+
+**Product** — a part Lee uses (e.g. "Hunter PGP-ADJ").
+Fields: name, sku, brand, categoryId, unit, description?, headType?,
+radiusM?, flowRate?, isActive (default true).
+Indexes: unique(sku), (categoryId).
+
+**Supplier** — Reece, WA Retic Supplies, Nutrien Water, Holman Direct.
+Fields: name, type, website?, notes?.
+
+**SupplierProduct** — a supplier's variant of a product.
+Fields: supplierId, productId, supplierSku, unitPrice, tradePrice?, inStock,
+lastChecked?.
+Indexes: unique(supplierId, productId).
+Computed: `effectivePrice` → tradePrice ?? unitPrice.
+
+**JobTemplate** — reusable install pattern (e.g. "Standard lawn zone").
+Fields: name, description, notes?.
+
+**JobTemplateLine** — one line in a template.
+Fields: templateId, productId, description, quantityFormulaId, sortOrder.
+`quantityFormulaId` is a **named function key**, not an expression string —
+see "Formulas" below.
+
+**BillOfMaterials** — a concrete parts list for a specific job.
+Fields: name, siteAddress?, createdAt, notes?.
+
+**BOMLine** — one resolved line.
+Fields: bomId, productId, description, quantity, supplierProductId?,
+unitPriceSnapshot, notes?.
+Computed: `lineTotal` → quantity * unitPriceSnapshot.
+
+**Snapshot rule:** `unitPriceSnapshot` is set at BOM creation time and never
+changes. Even in phase 1, this matters — Lee needs to be able to reproduce
+"what we quoted Mrs Smith last Tuesday."
+
+---
+
+## Formulas
+
+`JobTemplateLine.quantityFormulaId` references a typed TypeScript function in
+a registry, **not** a string expression evaluated at runtime:
+
+```ts
+// src/domain/formulas.ts
+export const formulas = {
+  headsForArea: ({ areaM2, coverageM2 }: { areaM2: number; coverageM2: number }) =>
+    Math.ceil(areaM2 / coverageM2),
+
+  pipeWithSlack: ({ runM }: { runM: number }) =>
+    runM * 1.1,
+
+  fixedQty: ({ qty }: { qty: number }) =>
+    qty,
+} as const;
+
+export type FormulaId = keyof typeof formulas;
+```
+
+Schema then references by name:
+
+```yaml
+JobTemplateLine:
+  fields:
+    quantityFormulaId: { type: "FormulaId" }   # codegen emits as keyof typeof formulas
+```
+
+Real types, autocomplete, tests, no parser, no eval. The schema doesn't need
+to know what a formula contains, only that it's a key into the registry.
+
+---
+
+## Money type
+
+Phase 1: **integer cents**. No `decimal.js`. Sufficient for Lee's scale,
+zero bundle cost, no floating-point traps.
+
+```yaml
+unitPrice: { type: "money" }   # codegen: number (cents)
+```
+
+If/when invoicing or tax handling lands, swap to a decimal type. The schema
+field type stays `money`; only the codegen mapping changes.
 
 ---
 
 ## Codegen
 
-Source: `domain.toml`
-Tool: `scripts/codegen.ts` — a Node script (tsx), reads TOML, emits TS files.
-No external codegen framework — straightforward template strings.
+### Source files
+
+- `domain.yaml` — the schema (one file, one document)
+- `domain.schema.json` — JSON Schema for editor validation of `domain.yaml`
+
+### Tool
+
+`scripts/codegen.ts` — Node script run via `tsx`. Reads YAML with the `yaml`
+package, validates with `ajv`, emits TS files via template strings. No
+codegen framework.
 
 ### Outputs
 
-| File | Contents |
-|------|----------|
-| `src/domain/types.ts` | TypeScript interfaces for all entities, value types, enums |
-| `src/domain/schemas.ts` | Zod schemas — one per entity, used for form validation and API parsing |
-| `src/domain/db.ts` | Kysely table type definitions for D1 |
-| `src/domain/fns.ts` | Function stubs from domain.toml — typed, with `// TODO` bodies |
-
-### Function stub format (domain.toml → TS)
-
-```toml
-[[entity.fn]]
-name = "effectivePrice"
-signature = "(): Money"
-body = "return this.tradePrice ?? this.unitPrice"
-```
-
-Emits in `fns.ts`:
-```ts
-// SupplierProduct
-export function supplierProductEffectivePrice(self: SupplierProduct): Money {
-  return self.tradePrice ?? self.unitPrice;
-}
-```
-
-Plain functions over `self` parameter — not class methods. Keeps it compatible
-with Kysely rows (plain objects) without a hydration step.
+| File | Contents | Hand-edit? |
+|---|---|---|
+| `src/domain/types.ts` | TS interfaces, enums, value types, FormulaId | No (regenerated) |
+| `src/domain/schemas.ts` | Zod schemas per entity | No (regenerated) |
+| `src/content.config.ts` | emdash content type definitions | No (regenerated) |
+| `migrations/NNNN_*.sql` | Schema diffs (manual review before applying) | Yes (review/rename) |
+| `src/domain/fns.ts` | Function stubs for `computed` references — only emitted if not present | Yes (write bodies) |
+| `src/domain/formulas.ts` | Formula registry | Yes (entirely hand-written) |
+| `docs/domain.md` | Human-readable schema doc with Mermaid ER diagram | No (regenerated) |
 
 ### Type mapping
 
-| domain.toml | TypeScript |
-|-------------|------------|
-| string | string |
-| bool | boolean |
-| f64 / i32 / u32 | number |
-| uuid | string (branded: `type Uuid = string & { __uuid: true }`) |
-| date | string (ISO 8601 date) |
-| datetime | string (ISO 8601 datetime) |
-| money | Decimal (from `decimal.js`) |
-| Option\<T\> | T \| null |
-| Vec\<T\> | T[] |
-| ref:\<Entity\> | EntityId (branded uuid) |
+| Schema | TypeScript |
+|---|---|
+| `string` | `string` |
+| `bool` | `boolean` |
+| `f64` / `i32` / `u32` | `number` |
+| `uuid` | `string` (branded `Uuid`) |
+| `date` | `string` (ISO 8601) |
+| `datetime` | `string` (ISO 8601) |
+| `money` | `number` (integer cents) |
+| `optional: true` | `T \| null` |
+| `ref: Foo` | `FooId` (branded uuid) |
 
-### Zod schema conventions
+---
 
-- money fields → `z.string()` then parsed to Decimal (avoids float loss)
-- uuid fields → `z.string().uuid()`
-- Optional fields → `.nullable()`
-- Enums → `z.enum([...])` from domain.toml variants
+## emdash interop
+
+The codegen emits `src/content.config.ts` in emdash's content type format
+(once we've inspected what that format actually is — gating investigation
+before any code is written).
+
+Lee gets:
+- emdash's admin React SPA for free
+- TipTap editor for description fields
+- Validation for free (Zod schemas wired in)
+- Migrations, drafts, revisions handled by emdash
+
+Computed logic (`effectivePrice`, BOM derivation from JobTemplate) is plain
+TS imported by emdash hooks/server functions.
+
+If emdash's content type format can't express something the schema needs
+(e.g. compound unique indexes, self-referential FKs), we either:
+1. Adjust the schema to fit emdash's capabilities, or
+2. Bypass emdash for that specific entity and hand-roll D1 access via Kysely
+
+Decision is per-entity, not global.
 
 ---
 
 ## File layout
 
 ```
-reticulationgardendoctor/   (emdash site repo)
-├── domain.toml             ← source of truth
-├── codegen.toml            ← codegen config (targets, type map)
+reticulationgardendoctor/
+├── domain.yaml                  ← source of truth (the schema)
+├── domain.schema.json           ← JSON Schema for IDE validation of domain.yaml
+├── codegen.config.yaml          ← codegen targets / type map
 ├── scripts/
-│   └── codegen.ts          ← the codegen script (tsx)
+│   └── codegen.ts               ← reads domain.yaml, emits everything
 ├── src/
+│   ├── content.config.ts        ← generated (emdash collections)
 │   └── domain/
-│       ├── types.ts         ← generated
-│       ├── schemas.ts       ← generated
-│       ├── db.ts            ← generated
-│       └── fns.ts           ← generated (stubs; real impls written here)
+│       ├── types.ts             ← generated
+│       ├── schemas.ts           ← generated (Zod)
+│       ├── fns.ts               ← stubs generated, bodies hand-written
+│       └── formulas.ts          ← entirely hand-written
+├── migrations/
+│   └── 0001_init.sql            ← generated, reviewed before commit
 └── package.json
     # add: "codegen": "tsx scripts/codegen.ts"
 ```
@@ -153,39 +283,75 @@ reticulationgardendoctor/   (emdash site repo)
 
 ## What's deferred
 
-The original domain.toml had a much broader scope — quoting, procurement,
-logistics, job scheduling, locality clustering. All of that is valid for later
-phases but not needed for the parts catalogue tool. It's preserved in
-`domain.full.toml` for reference.
+Phase 1 is parts catalogue + BOM only. The earlier broader scope (preserved
+in `domain.full.toml` for reference) covers:
 
-Future phases roughly:
-- Phase 2: Quote builder (QuoteLine, customer contact form → email to Lee)
-- Phase 3: Procurement (PurchaseOrder, SupplierOrder, receipt tracking)
-- Phase 4: Job scheduling + logistics (multi-stop day planning, locality clusters)
+- **Phase 2** — Quote builder. Customer/Lead, Quote, QuoteLine, contact form
+- **Phase 3** — Procurement. PurchaseOrder, supplier ordering, receipts
+- **Phase 4** — Job scheduling + logistics. Multi-stop day planning, locality clusters
+
+Each phase adds entities to `domain.yaml` and lets the existing codegen
+pipeline pick them up. No tooling changes expected per phase.
 
 ---
 
-## Open questions for Opus
+## Investigation gate (do these before writing code)
 
-1. **quantity_formula** — simple string expression evaluated at runtime (e.g.
-   `ceil(area_m2 / head_coverage_m2)`) vs. a structured formula type in TOML?
-   String is flexible but opaque. Structured (operator + operands) is verbose
-   but statically analysable. Which is better here?
+1. **Read `packages/core/src/content/`** in the emdash repo — figure out the
+   exact content type definition format. This determines what `codegen-emdash`
+   has to emit and whether some schema features need to bend to fit.
 
-2. **BOMLine.unit_price_snapshot** — snapshotting supplier price at BOM
-   creation time makes sense for quoting, but for a simple parts list Lee
-   might just want live prices. Should the BOM model care about price at all
-   in phase 1, or just quantities?
+2. **Read the plugin RFC on `wip/plugin-rfc`** — see if this should be
+   structured as an emdash plugin rather than just a sibling module.
 
-3. **money type** — `decimal.js` in the browser/worker is fine but adds a dep.
-   For phase 1 (parts list, no invoicing), is plain `number` (cents as integer)
-   acceptable? Simpler, no dep, sufficient for display.
+3. **Get Lee's actual parts list.** The schema can be designed in the
+   abstract, but seed data needs the specific brands/SKUs Lee uses. Without
+   this, the catalogue has nothing to populate it with.
 
-4. **domain.toml fn bodies in TS** — the TOML embeds short function bodies as
-   strings. Is this a good pattern or should the TOML only define signatures
-   and the bodies always live in hand-written `fns.ts`? Bodies in TOML are
-   convenient for trivial computed fields but feel wrong for anything non-trivial.
+---
 
-5. **Kysely vs raw D1 queries for phase 1** — emdash uses Kysely internally.
-   Should the parts catalogue use Kysely too (consistency) or just raw
-   `env.DB.prepare()` calls (simpler, fewer abstractions for a small catalogue)?
+## Open questions (after investigation)
+
+1. **Snapshot enforcement.** Should `BOMLine.unitPriceSnapshot` be enforced
+   immutable at the DB layer (trigger/CHECK constraint), or only at the
+   application layer? Cheaper at the app layer; more correct at the DB.
+
+2. **emdash content type expressiveness.** Once we've read emdash's content
+   config format: can it express the SupplierProduct join with compound
+   unique index? If not, we go around it for that one table.
+
+3. **Schema versioning.** Should `domain.yaml` carry a `version: "0.1.0"`
+   field that gates migration generation, or is git history sufficient?
+   Probably git for now; revisit if/when there are multiple deployed copies.
+
+4. **Codegen idempotency for `fns.ts`.** When a `computed:` is added to the
+   schema, the codegen needs to add a stub to `fns.ts` *without* clobbering
+   existing stubs. Implementation choice: parse `fns.ts` AST and merge, or
+   maintain a separate `fns.generated.ts` plus a hand-written `fns.ts` that
+   re-exports overrides? AST merge is more elegant; two-file approach is
+   simpler and probably correct.
+
+5. **Where the schema language lives long-term.** If this works, it becomes
+   `fluid-notion-labs/schemata` — a separate repo with the parser (well, just
+   a YAML loader + JSON Schema validator), the codegen targets as separate
+   packages, and a real format spec doc. The retic site then depends on it.
+   For now keep it in-tree until the shape settles.
+
+---
+
+## Why this, vs just using emdash directly
+
+A reasonable critique: emdash already does collections, schemas, validation,
+admin UI. Why a separate schema layer at all?
+
+**Answer:** because the long-term experiment is *not* about Lee's site. It's
+about whether a single declarative schema can drive multiple targets across
+multiple language ecosystems. emdash is the *first target*, not the source.
+
+If we just used emdash's content config as the source of truth, we'd lock
+ourselves to TS and to emdash's content-shape vocabulary forever. The cost of
+a thin schema layer on top is low; the cost of not having one and wanting it
+later is rewriting all the content config.
+
+If after building Lee's site this layer feels like dead weight, we delete it
+and keep the emdash configs. Cheap experiment.
