@@ -43,10 +43,10 @@ Issues that refer to the interface must include a screenshot that shows the repo
 Agents can attach local images with GitHub CLI 2.99.0 or later. The `--attach` flag is repeatable on `gh issue create|edit|comment` and `gh pr create|edit|comment`. For example:
 
 ```bash
-gh issue create --body-file /tmp/emdash-issue.md \
+gh issue create --body-file tmp/emdash-issue.md \
 	--attach './interface-error.png#The settings screen showing the validation error'
 
-gh pr create --body-file /tmp/emdash-pr.md \
+gh pr create --body-file tmp/emdash-pr.md \
 	--attach './before.png#Settings screen before the change' \
 	--attach './after.png#Settings screen after the change'
 ```

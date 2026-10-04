@@ -1,0 +1,30 @@
+{
+	"name": "@emdash-cms/plugin-ai-edit",
+	"version": "0.0.1",
+	"description": "In-site AI editing agent for EmDash CMS. Logged-in editors get a floating widget on public pages and can change content by voice (Workers AI transcription) or text; edits are proposed as structured diffs and applied only after explicit confirmation.",
+	"type": "module",
+	"main": "src/index.ts",
+	"exports": {
+		".": "./src/index.ts",
+		"./plugin": "./src/index.ts",
+		"./widget": "./src/widget.ts"
+	},
+	"files": ["src"],
+	"keywords": ["emdash", "cms", "plugin", "ai", "editing", "agent", "workers-ai"],
+	"license": "MIT",
+	"peerDependencies": {
+		"emdash": "workspace:>=0.9.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20250224.0",
+		"vitest": "catalog:"
+	},
+	"scripts": {
+		"typecheck": "tsgo --noEmit"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/emdash-cms/emdash.git",
+		"directory": "packages/plugins/ai-edit"
+	}
+}
