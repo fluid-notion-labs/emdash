@@ -134,8 +134,11 @@ function parseToolCalls(value: unknown): AiToolCall[] {
 	for (const entry of value) {
 		if (!isRecord(entry)) continue;
 		const fn = isRecord(entry.function) ? entry.function : null;
-		const name =
+		const rawName =
 			typeof fn?.name === "string" ? fn.name : typeof entry.name === "string" ? entry.name : null;
+		// gpt-oss sometimes leaks channel markers into the name
+		// (e.g. "propose_edits<|channel|>commentary"); trim them off.
+		const name = rawName?.replace(/<\|[^|>]*\|>/g, "").replace(/(commentary|final|analysis)$/, "");
 		if (!name) continue;
 		const rawArgs = fn?.arguments ?? entry.arguments ?? entry.parameters ?? "{}";
 		let args: unknown;
@@ -158,6 +161,7 @@ export async function runChatTurn(
 	options: AiOptions,
 	messages: AiChatMessage[],
 	tools: AiToolSpec[],
+	opts: { forceToolChoice?: boolean } = {},
 ): Promise<AiChatResult> {
 	const ai = await resolveAiBinding(options);
 	const raw = await ai.run(options.model ?? DEFAULT_MODEL, {
@@ -170,7 +174,9 @@ export async function runChatTurn(
 				parameters: tool.parameters,
 			},
 		})),
-		tool_choice: "auto",
+		// The first round always wants a read; some models otherwise answer
+		// the user directly and hallucinate content they never fetched.
+		tool_choice: opts.forceToolChoice ? "required" : "auto",
 		// Reasoning models (gpt-oss, GLM) spend the budget on reasoning before
 		// emitting content or tool calls; too small a cap yields empty replies.
 		max_completion_tokens: 2048,

@@ -1,0 +1,28 @@
+---
+import { getEmDashCollection } from "emdash";
+import Base from "../layouts/Base.astro";
+
+const { entries: posts } = await getEmDashCollection("posts");
+---
+
+<Base title="AI Edit Demo - EmDash">
+	<h1>AI Edit Demo</h1>
+	<p class="subtitle">In-site editing agent for logged-in editors.</p>
+
+	<div class="hint">
+		Sign in as an editor, then use the floating widget on any page to ask for
+		edits by voice or text and review the proposed changes.
+	</div>
+
+	<ul>
+		{
+			posts.map((post) => (
+				<li>
+					<a href={`/posts/${post.data.slug || post.id}`}>
+						{post.data.title || "Untitled"}
+					</a>
+				</li>
+			))
+		}
+	</ul>
+</Base>

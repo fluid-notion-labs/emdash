@@ -1,0 +1,23 @@
+---
+import { getEmDashCollection } from "emdash";
+import Base from "../../layouts/Base.astro";
+
+const { entries: posts } = await getEmDashCollection("posts");
+---
+
+<Base title="Posts - AI Edit Demo">
+	<a href="/" class="back">&larr; Back to home</a>
+	<h1>Posts</h1>
+
+	<ul>
+		{
+			posts.map((post) => (
+				<li>
+					<a href={`/posts/${post.data.slug || post.id}`}>
+						{post.data.title || "Untitled"}
+					</a>
+				</li>
+			))
+		}
+	</ul>
+</Base>

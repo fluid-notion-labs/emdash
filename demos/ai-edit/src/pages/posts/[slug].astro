@@ -1,0 +1,38 @@
+---
+import { getEmDashEntry, decodeSlug } from "emdash";
+import { PortableText } from "emdash/ui";
+import Base from "../../layouts/Base.astro";
+
+const slug = decodeSlug(Astro.params.slug);
+
+const { entry: post } = slug
+	? await getEmDashEntry("posts", slug)
+	: { entry: null };
+
+if (!post) {
+	return Astro.rewrite("/404");
+}
+---
+
+<Base
+	title={post.data.title || "Post"}
+	description={post.data.excerpt ?? null}
+	content={{ collection: "posts", id: post.id, slug: post.data.slug }}
+>
+	<a href="/posts" class="back">&larr; Back to posts</a>
+	<article>
+		<h1>{post.data.title || "Untitled"}</h1>
+		<div style="color:#555; margin-bottom:1rem;">{post.data.excerpt}</div>
+		<div>
+			{
+				Array.isArray(post.data.content) && post.data.content.length > 0 ? (
+					<PortableText value={post.data.content} />
+				) : typeof post.data.content === "string" && post.data.content ? (
+					<p>{post.data.content}</p>
+				) : (
+					<p style="color: #6b7280; font-style: italic;">No content yet.</p>
+				)
+			}
+		</div>
+	</article>
+</Base>

@@ -1,0 +1,94 @@
+---
+import { createPublicPageContext } from "emdash/page";
+import { EmDashHead, EmDashBodyStart, EmDashBodyEnd } from "emdash/ui";
+
+interface Props {
+	title: string;
+	description?: string | null;
+	/** Content reference so plugin fragments resolve the page's entry */
+	content?: { collection: string; id: string; slug?: string | null };
+}
+
+const { title, description, content } = Astro.props;
+
+const pageCtx = createPublicPageContext({
+	Astro,
+	kind: content ? "content" : "custom",
+	title,
+	description,
+	content,
+	siteName: "AI Edit Demo",
+});
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width" />
+		<title>{title}</title>
+		{description && <meta name="description" content={description} />}
+		<EmDashHead page={pageCtx} />
+		<style>
+			* {
+				box-sizing: border-box;
+				margin: 0;
+				padding: 0;
+			}
+			body {
+				font-family:
+					system-ui,
+					-apple-system,
+					sans-serif;
+				line-height: 1.6;
+				color: #1a1a1a;
+				max-width: 720px;
+				margin: 0 auto;
+				padding: 2rem;
+			}
+			h1 {
+				font-size: 1.75rem;
+				margin-bottom: 0.5rem;
+			}
+			.subtitle {
+				color: #555;
+				margin-bottom: 1.5rem;
+			}
+			.hint {
+				background: #eff6ff;
+				border: 1px solid #bfdbfe;
+				border-radius: 8px;
+				padding: 1rem;
+				margin-bottom: 1.5rem;
+				font-size: 0.9rem;
+				color: #1e40af;
+			}
+			ul {
+				list-style: none;
+			}
+			li {
+				border-bottom: 1px solid #e5e7eb;
+				padding: 1rem 0;
+			}
+			li a {
+				color: #2563eb;
+				text-decoration: none;
+			}
+			.back {
+				color: #2563eb;
+			}
+			.adminlink {
+				margin-top: 1.5rem;
+			}
+			.adminlink a {
+				color: #2563eb;
+			}
+		</style>
+	</head>
+	<body>
+		<EmDashBodyStart page={pageCtx} />
+		<slot />
+		<p class="adminlink"><a href="/_emdash/admin">Open Admin</a></p>
+		<EmDashBodyEnd page={pageCtx} />
+	</body>
+</html>

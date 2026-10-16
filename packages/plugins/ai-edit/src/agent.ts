@@ -168,7 +168,8 @@ const TOOL_DEFINITIONS: Record<string, { spec: AiToolSpec; execute: ToolExecutor
 			if (!collection || !id) throw new Error("collection and id are required");
 			const content = ctx.content;
 			if (!content) throw new Error("content:read capability missing");
-			const item = await content.get(collection, id);
+			const item =
+				(await content.get(collection, id)) ?? (await findBySlug(content, collection, id));
 			if (!item) throw new Error(`Entry '${collection}/${id}' not found`);
 			return { collection, id: item.id, slug: item.slug, status: item.status, data: item.data };
 		},
@@ -286,6 +287,16 @@ function pickTitle(item: { data: Record<string, unknown>; slug: string | null })
 	return item.slug;
 }
 
+/** Fast models pass the slug as id; resolve it with a bounded list-and-match. */
+async function findBySlug(
+	content: NonNullable<ToolContext["content"]>,
+	collection: string,
+	slug: string,
+) {
+	const { items } = await content.list(collection, { limit: 100 });
+	return items.find((i) => i.slug === slug) ?? items.find((i) => i.id === slug) ?? null;
+}
+
 const TOOL_SPECS: AiToolSpec[] = Object.values(TOOL_DEFINITIONS).map((t) => t.spec);
 
 // ── System prompt ────────────────────────────────────────────────
@@ -345,7 +356,12 @@ export async function runAgentTurn(
 					error: { code: "AGENT_TIMEOUT", message: "The agent turn took too long." },
 				};
 			}
-			const result = await runChatTurn(options, messages, TOOL_SPECS);
+			const result = await runChatTurn(
+				options,
+				messages,
+				TOOL_SPECS,
+				toolTrace.some((t) => t.ok) ? {} : { forceToolChoice: true },
+			);
 
 			if (result.toolCalls.length === 0) {
 				return {
